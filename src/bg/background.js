@@ -11,6 +11,7 @@
   	chrome.pageAction.show(sender.tab.id);
     sendResponse();
   });*/
+var syncRemovedWindows = [];
 
 function getCurrentWindowCount() {
 	var getInfo = {
@@ -47,12 +48,12 @@ function windowCreateHandler(window) {
 				if (result.syncStarted) {
 					syncAllWindows(window);
 				} else { // No other device is running.
+					chrome.storage.local.set({
+						windows: [],
+					});
 					chrome.storage.sync.set({
 						syncStarted: true,
 						windows: []
-					});
-					chrome.storage.local.set({
-						windows: [],
 					});
 					addWindow(window);
 				}
@@ -67,7 +68,9 @@ function windowCreateHandler(window) {
 // wants to actually close all opened tabs or just shutting
 // the program down until the user starts to use it again.
 function windowRemoveHandler(windowId) {
-	if (confirm('Remove these tabs from sync?')) {
+	if (syncRemovedWindows.includes(windowId)) {
+		syncRemovedWindows.splice(syncRemovedWindows.indexOf(windowId), 1);
+	} else if (confirm('Remove these tabs from sync?')) {
 		getCurrentWindowCount().then(count => {
 			if (count == 0) {
 				chrome.storage.sync.set({
@@ -216,6 +219,45 @@ function addTab(tabId, windowId, url) {
 function removeTab(tabId, windowID) {
 }
 
+// Sync event handlers
+
+function syncEventHandler(change, areaName) {
+	if (areaName == "sync" && typeof change.windows != "undefined") {
+		console.log('sync change: ', change);
+		chrome.storage.local.get(['windows'], result => {
+			if (change.windows.newValue.length != result.windows.length) { // If window created/removed
+				if (change.windows.newValue.length > change.windows.oldValue.length) { // A new window created
+					chrome.windows.create({
+						type: "normal"
+					}, window => {
+						result.windows.push({
+							id: window.id,
+							tabs: []
+						});
+						chrome.storage.local.set({
+							windows: result.windows
+						});
+					});
+				} else { // A window removed
+					for (var i = 0; i < change.windows.oldValue.length; i++) {
+						if (change.windows.oldValue[i] != change.windows.newValue[i]) {
+							chrome.storage.local.get(['windows'], result => {
+								syncRemovedWindows.push(result.windows[i].id);
+								chrome.windows.remove(result.windows[i].id);
+								result.windows.splice(i, 1);
+								chrome.storage.local.set({
+									windows: result.windows
+								});
+							});
+							break;
+						}
+					}
+				}
+			}
+		});
+	}
+}
+
 // Debug functions
 function logCurrentLocalSyncInfo() {
 	chrome.storage.local.get(['windows'], result => {
@@ -244,3 +286,4 @@ function wipeGlobalSyncInfo() {
 
 chrome.windows.onCreated.addListener(windowCreateHandler);
 chrome.windows.onRemoved.addListener(windowRemoveHandler);
+chrome.storage.onChanged.addListener(syncEventHandler);
