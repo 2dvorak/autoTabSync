@@ -11,6 +11,7 @@
   	chrome.pageAction.show(sender.tab.id);
     sendResponse();
   });*/
+var windowsAddedBySync = [];
 var windowsRemovedBySync = [];
 
 function getCurrentWindowCount() {
@@ -34,12 +35,57 @@ function logCurrentWindowCount() {
 
 // Handlers for window/tab events.
 
+// When windowCreateHandler is triggered, there is no way that we
+// can decide whether the window was created by user, or it was
+// created by sync handler because a new window was created from
+// another device. For the latter case, we should not sync newly
+// created window to other devices - it isn't a original window, but
+// a copied window. So in order to decide that, I created a list
+// called 'windowsAddedBySync'. Before creating a new window in the
+// sync handler, we push the 'wid' of synced window to the list. In
+// the callback function of chrome.windows.create, we tag the
+// previously pushed entry with the window ID. The windowCreateHandler
+// checks if windowsAddedBySync list has element, and wait until all
+// elements have been tagged with a window ID. If there is a matching
+// window ID for the newly created window that triggered
+// windowCreateHandler, we can decied that the window was created by
+// sync handler, so we don't need to sync that window with other
+// devices.
+function windowCreateHandler(window) {
+	console.log('windowCreateHandler');
+	if (windowsAddedBySync.length > 0) {
+		if (!windowsAddedBySync.every(obj => {
+			return (typeof obj.id != "undefined");
+		})) {
+			console.log('wait for all elements tagged with window ID');
+			setTimeout(() => {
+				windowCreateHandler(window);
+			}, 500);
+		} else {
+			// Check if there is no matching window ID
+			if (windowsAddedBySync.every(obj => {
+				return (obj.id != window.id);
+			})) { // This window is created by user, not sync handler.
+				console.log('window created by user');
+				windowCreateByUserHandler(window);
+			} else { // This window is created by sync handler, thus no need to sync it.
+				// Remove corresponding entry from 'windowsAddedBySync' list.
+				console.log('window created by sync handler');
+				windowsAddedBySync.splice(windowsAddedBySync.findIndex(obj => obj.id == window.id), 1);
+			}
+		}
+	} else {
+		console.log('window created by user(length == 0)');
+		windowCreateByUserHandler(window);
+	}
+}
+
 // When a new window is created, we should check
 // if it's the first window/tab created across our
 // synced devices. If it is the first one, start
 // syncing and if not, sync to other device's
 // current tabs.
-function windowCreateHandler(window) {
+function windowCreateByUserHandler(window) {
 	getCurrentWindowCount().then(count => {
 		// First created window.
 		if (count == 1) {
@@ -268,16 +314,18 @@ function syncEventHandler(change, areaName) {
 								return window2.wid != window.wid;
 							});
 						});
-						// TODO: Improve this.
-						// Temporarily disable event listener for window created, becasuse
-						// created window causes event listener to add created window to syncInfo.
-						// Hope this does not cause any problem...
-						chrome.windows.onCreated.removeListener(windowCreateHandler);
+						// Register new entry for windows that was created by sync handler.
+						// After the window was created, tag window ID to the entry.
+						// The windowCreateHandler is waiting until all entires are tagged.
+						// If if finds a matching window ID, it will skip syncing the newly created window.
+						windowsAddedBySync.push({wid: diffWindow.wid});
 						chrome.windows.create({
 							type: "normal"
 						}, window => {
-							// Now turn event listner back on.
-							chrome.windows.onCreated.addListener(windowCreateHandler);
+							newWindow = windowsAddedBySync.find(obj => obj.wid == diffWindow.wid);
+							if (typeof newWindow != "undefined") {
+								newWindow.id = window.id;
+							}
 							result.windows.push({
 								wid: diffWindow.wid,
 								id: window.id,
