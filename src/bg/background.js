@@ -18,6 +18,8 @@ var tabsRemovedBySync = []; // Array of id.
 var tabsRemovedByWindowClose = []; // Not sure if we need this.
 var syncInProcess = false;
 
+var newTabUrl = "chrome://newtab/";
+
 function getCurrentWindowCount() {
 	var getInfo = {
 		populate: true,
@@ -267,10 +269,14 @@ function syncAllWindows(window) {
 						} else {
 							return Promise.all(result.windows[wid].tabs.map(tid => {
 								return new Promise((resolveTabCreate, rejectTabCreate) => {
+									let url = result.tabs[tid].url;
+									if (url == "") {
+										url = newTabUrl;
+									}
 									chrome.tabs.create({
 										windowId: window.id,
 										index: result.tabs[tid].pos,
-										url: result.tabs[tid].url
+										url: url
 									}, tab => {
 										localSyncInfo.windows[wid].tabs.push(tid);
 										localSyncInfo.tabs.tids.push(tid);
@@ -432,7 +438,7 @@ function syncAddedTab(tabId, windowId, url, index) {
 					resolve(false);
 					return;
 				} else {
-					wid = result.windows.wids.find(obj => {
+					wid = result.windows.wids.find(obj => { // FIXME: cannot read 'find' of undefined
 						return result.windows[obj].id == windowId;
 					});
 					if (typeof wid == "undefined") {
@@ -596,31 +602,87 @@ function syncEventHandler(change, areaName) {
 						Promise.all(change.windows.newValue.wids.map(wid => {
 							return new Promise((resolve, reject) => {
 								windowsAddedBySync.push({ wid: wid });
-								chrome.windows.create({ type: "normal" }, window => {
+								// Get the first tab, there should be at least one tab.
+								if (change.windows.newValue[wid].tabs.length == 0) {
+									console.log("Error!!!! Why no tab associated with this window? ", change.windows.newValue[wid]);
+									return;
+								}
+								let firstTid = change.windows.newValue[wid].tabs[0];
+								if (typeof change.tabs.newValue[firstTid] == "undefined") {
+									console.log("Error!!! Why this window's first tab not in sync.tabs?? ", change.tabs.newValue);
+									return;
+								}
+								let firstTab = change.tabs.newValue[firstTid];
+								let firstUrl = firstTab.url;
+								if (firstUrl == "") {
+									firstUrl = newTabUrl;
+								}
+								tabsAddedBySync.push({ tid: firstTid });
+								chrome.windows.create({
+									type: "normal",
+									url: firstUrl
+								}, window => {
 									windowsAddedBySync.find(obj => obj.wid == wid).id = window.id;
 									result.windows.wids.push(wid);
 									result.windows[wid] = {
 										wid: wid,
 										id: window.id,
-										tabs: []
+										tabs: [firstTid]
 									};
+									if (typeof result.tabs == "undefined") {
+										result.tabs = {
+											tids: []
+										};
+									}
+									if (typeof result.tabs.tids == "undefined") {
+										result.tabs.tids = [];
+									}
+									if (window.tabs.length == 0) {
+										console.log("Error!!! Why windows.tabs empty??? ", window.tabs);
+									} else {
+										console.log("Window successfully created with tab ", window.tabs);
+										tabsAddedBySync.find(obj => obj.tid == firstTid).id = window.tabs[0].id;
+										result.tabs.tids.push(firstTid);
+										result.tabs[firstTid] = {
+											id: window.tabs[0].id,
+											tid: firstTid,
+											wid: wid,
+											url: firstUrl == newTabUrl ? "" : firstUrl,
+											pos: 0
+										};
+									}
 									if (change.windows.newValue[wid].tabs.length > 0) { // There are tabs to create, too
-										Promise.all(change.windows.newValue[wid].tabs.map(tid => {
+										console.log("Also syncing tabs of the window created by another device");
+										console.log("tabs: ", change.windows.newValue[wid].tabs);
+										return Promise.all(change.windows.newValue[wid].tabs.map(tid => {
+											if (change.windows.newValue[wid].tabs.indexOf(tid) == 0) { // Skip first tab, we already handled it.
+												return;
+											}
 											tabsAddedBySync.push({ tid: tid });
 											return new Promise((resolve2, reject2) => {
+												let url = change.tabs.newValue[tid].url;
+												if (url == "") {
+													url = newTabUrl;
+												}
+												console.log("Syncing another device's tab: ", url);
 												chrome.tabs.create({
 													windowId: window.id,
-													url: change.tabs.newValue[tid].url,
+													url: url,
 													index: change.tabs.newValue[tid].pos
 												}, tab => {
 													tabsAddedBySync.find(obj => obj.tid == tid).id = tab.id;
-													result.tabs.tids.push(tid);
+													if (typeof result.tabs == "undefined") {
+														result.tabs = {
+															tids: []
+														};
+													}
+													result.tabs.tids.push(tid); // FIXME: cannot read property tids of undefined
 													result.tabs[tid] = {
 														id: tab.id,
 														tid: tid,
 														wid: wid,
 														pos: tab.index,
-														url: tab.url
+														url: tab.url 
 													};
 													result.windows[wid].tabs.push(tid);
 													resolve2();
@@ -737,10 +799,14 @@ function syncEventHandler(change, areaName) {
 										promises.push(new Promise((resolve, reject) => {
 											tabsAddedBySync.push({ tid: tid });
 											let wid = change.tabs.newValue[tid].wid;
+											let url = change.tabs.newValue[tid].url;
+											if (url == "") {
+												url = newTabUrl;
+											}
 											chrome.tabs.create({
 												windowId: result.windows[wid].id,
 												index: change.tabs.newValue[tid].pos,
-												url: change.tabs.newValue[tid].url
+												url: url
 											}, tab => {
 												tabsAddedBySync.find(obj => obj.tid == tid).id = tab.id;
 												result.windows[wid].tabs.push(tid);
@@ -774,10 +840,14 @@ function syncEventHandler(change, areaName) {
 											}
 											promises.push(new Promise((resolve, reject) => {
 												tabsAddedBySync.push({ tid: tid});
+												let url = change.tabs.newValue[tid].url;
+												if (url == "") {
+													url = newTabUrl;
+												}
 												chrome.tabs.create({
 													windowId: result.windows[change.tabs.newValue[tid].wid].id,
 													index: change.tabs.newValue[tid].pos,
-													url: change.tabs.newValue[tid].url
+													url: url
 												}, tab => {
 													tabsAddedBySync.find(obj => obj.tid == tid).id = tab.id;
 													result.windows[change.tabs.newValue[tid].wid].tabs.push(tid);
