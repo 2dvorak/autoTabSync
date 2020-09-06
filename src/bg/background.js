@@ -721,6 +721,10 @@ function syncEventHandler(change, areaName) {
 							let tabId = -1;
 							// First, close all tabs attached to this window.
 							return Promise.all(result.windows[wid].tabs.map(tid => {
+								if (typeof result.tabs[tid] == "undefined") {
+									console.log("Cannot find tab with tid: ", tid);
+									return;
+								}
 								tabsRemovedBySync.push(tid);
 								tabId = result.tabs[tid].id;
 								result.windows[wid].tabs.splice(result.windows[wid].tabs.indexOf(tid), 1);
@@ -755,7 +759,9 @@ function syncEventHandler(change, areaName) {
 							if (typeof result.windows == "undefined" ? true : !result.windows.wids.includes(wid)) { // Not local event
 								console.log("A new window created in another device");
 								return new Promise((resolve, reject) => {
+									windowsAddedBySync.push({ wid: wid });
 									chrome.windows.create({ type: "normal" }, window => {
+										windowsAddedBySync.find(obj => obj.wid == wid).id = window.id;
 										result.windows.wids.push(wid);
 										result.windows[wid] = {
 											id: window.id,
@@ -895,7 +901,12 @@ function syncEventHandler(change, areaName) {
 									}
 									return new Promise((resolve, reject) => {
 										windowsRemovedBySync.push(wid);
-										chrome.windows.remove(wid, () => {
+										if (typeof result.windows[wid] == "undefined") {
+											console.log("Cannot find window with wid: ", wid);
+											resolve();
+											return;
+										}
+										chrome.windows.remove(result.windows[wid].id, () => {
 											resolve();
 										});
 									});
