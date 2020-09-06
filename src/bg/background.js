@@ -137,6 +137,7 @@ function windowRemoveHandler(windowId) {
 
 function tabCreateHandler(tab) {
 	console.log('tabCreateHandler: ', tab);
+	console.log("tabsAddedBySync: ", tabsAddedBySync);
 	if (tabsAddedBySync.length > 0) {
 		if (!tabsAddedBySync.every(obj => {
 			return (typeof obj.id != "undefined");
@@ -384,6 +385,16 @@ function syncRemovedWindow(windowId) {
 					wid = result.windows.wids.find(obj => {
 						return result.windows[obj].id == windowId;
 					});
+					if (typeof result.windows[wid].tabs != "undefined" ? result.windows[wid].tabs.length != 0 : false) {
+						result.windows[wid].tabs.forEach(tid => {
+							if (result.tabs.tids.includes(tid)) {
+								result.tabs.tids.splice(result.tabs.tids.indexOf(tid), 1);
+							}
+							if (typeof result.tabs[tid] != "undefined") {
+								delete result.tabs[tid];
+							}
+						});
+					}
 					result.windows.wids.splice(result.windows.wids.indexOf(wid), 1);
 					delete result.windows[wid];
 					chrome.storage.local.set({
@@ -397,9 +408,19 @@ function syncRemovedWindow(windowId) {
 		}).then(() => {
 			return new Promise((resolve, reject) => {
 				logCurrentGlobalSyncInfo();
-				chrome.storage.sync.get(['windows'], result => {
+				chrome.storage.sync.get(['windows', 'tabs'], result => {
 					console.log('globalSync: ' + result.windows);
 					if (typeof result.windows != "undefined") {
+						if (typeof result.windows[wid].tabs != "undefined" ? result.windows[wid].tabs.length != 0 : false) {
+							result.windows[wid].tabs.forEach(tid => {
+								if (result.tabs.tids.includes(tid)) {
+									result.tabs.tids.splice(result.tabs.tids.indexOf(tid), 1);
+								}
+								if (typeof result.tabs[tid] != "undefined") {
+									delete result.tabs[tid];
+								}
+							});
+						}
 						result.windows.wids.splice(result.windows.wids.indexOf(wid), 1);
 						chrome.storage.sync.set({
 							windows: result.windows
@@ -746,7 +767,8 @@ function syncEventHandler(change, areaName) {
 							});
 						})).then(() => {
 							chrome.storage.local.set({
-								windows: result.widows
+								windows: result.widows,
+								tabs: result.tabs
 							}, () => rootResolve());
 						});
 					}
