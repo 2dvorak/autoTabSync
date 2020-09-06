@@ -11,8 +11,12 @@
   	chrome.pageAction.show(sender.tab.id);
     sendResponse();
   });*/
-var windowsAddedBySync = [];
-var windowsRemovedBySync = [];
+var windowsAddedBySync = []; // Array of Object. [ { wid: 'aabbaabb', id: 1 }, { wid: 'ccddccdd' } ]
+var windowsRemovedBySync = []; // Array of id.
+var tabsAddedBySync = []; // Array of Object.
+var tabsRemovedBySync = []; // Array of id.
+var tabsRemovedByWindowClose = []; // Not sure if we need this.
+var syncInProcess = false;
 
 function getCurrentWindowCount() {
 	var getInfo = {
@@ -52,7 +56,7 @@ function logCurrentWindowCount() {
 // sync handler, so we don't need to sync that window with other
 // devices.
 function windowCreateHandler(window) {
-	console.log('windowCreateHandler');
+	console.log('windowCreateHandler: ', window);
 	if (windowsAddedBySync.length > 0) {
 		if (!windowsAddedBySync.every(obj => {
 			return (typeof obj.id != "undefined");
@@ -80,12 +84,14 @@ function windowCreateHandler(window) {
 	}
 }
 
+// TODO: Ask if user want to sync this window?
 // When a new window is created, we should check
 // if it's the first window/tab created across our
 // synced devices. If it is the first one, start
 // syncing and if not, sync to other device's
 // current tabs.
 function windowCreateByUserHandler(window) {
+	console.log("windowCreateByUserHandler: ", window);
 	getCurrentWindowCount().then(count => {
 		// First created window.
 		if (count == 1) {
@@ -94,12 +100,6 @@ function windowCreateByUserHandler(window) {
 				if (typeof result.windows != "undefined") {
 					syncAllWindows(window);
 				} else { // No other device is running.
-					chrome.storage.local.set({
-						windows: [],
-					});
-					chrome.storage.sync.set({
-						windows: []
-					});
 					syncAddedWindow(window);
 				}
 			});
@@ -109,17 +109,19 @@ function windowCreateByUserHandler(window) {
 	});
 }
 
+// TODO: Ask for sync clear if it's the last window.
 // When window is removed, we should decide if the user
 // wants to actually close all opened tabs or just shutting
 // the program down until the user starts to use it again.
 function windowRemoveHandler(windowId) {
+	console.log("windowRemoveHandler: ", windowId);
 	if (windowsRemovedBySync.includes(windowId)) {
+		console.log("windowRemoveHandler done (started by synced window)");
 		windowsRemovedBySync.splice(windowsRemovedBySync.indexOf(windowId), 1);
 	} else if (confirm('Remove these tabs from sync?')) {
 		getCurrentWindowCount().then(count => {
 			if (count == 0) {
-				chrome.storage.local.clear();
-				chrome.storage.sync.clear();
+				clearSyncInfo();
 			} else {
 				syncRemovedWindow(windowId);
 			}
@@ -132,227 +134,718 @@ function windowRemoveHandler(windowId) {
 }
 
 function tabCreateHandler(tab) {
-	syncAddedTab(tab.id, tab.windowId, tab.url);
+	console.log('tabCreateHandler: ', tab);
+	if (tabsAddedBySync.length > 0) {
+		if (!tabsAddedBySync.every(obj => {
+			return (typeof obj.id != "undefined");
+		})) {
+			console.log('wait for all elements tagged with tab ID');
+			setTimeout(() => {
+				tabCreateHandler(tab);
+			}, 500);
+		} else {
+			// Check if there is no matching tab ID
+			if (tabsAddedBySync.every(obj => {
+				return (obj.id != tab.id);
+			})) { // This tab is created by user, not sync handler.
+				console.log('tab created by user');
+				tabCreateByUserHandler(tab);
+			} else { // This tab is created by sync handler, thus no need to sync it.
+				// Remove corresponding entry from 'tabsAddedBySync' list.
+				console.log('tab created by sync handler');
+				tabsAddedBySync.splice(tabsAddedBySync.findIndex(obj => obj.id == tab.id), 1);
+			}
+		}
+	} else {
+		console.log('tab created by user(length == 0)');
+		tabCreateByUserHandler(tab);
+	}
+}
+
+function tabCreateByUserHandler(tab) {
+	console.log("tabCreateByUserHandler: ", tab);
+	syncAddedTab(tab.id, tab.windowId, tab.url, tab.index);
 }
 
 function tabRemoveHandler(tabId, removeInfo) {
+	console.log("tabRemoveHandler: " + tabId);
 	if (removeInfo.isWindowClosing) {
 		// Do nothing. windowRemoveHandler will handle this.
+	} else if (tabsRemovedBySync.includes(tabId)) {
+		tabsRemovedBySync.splice(tabsRemovedBySync.indexOf(tabId), 1);
 	} else {
-		chrome.tabs.get(tabId, tab => {
-			syncRemovedTab(tab.id, tab.windowId);
-		});
+		syncRemovedTab(tabId);
 	}
 }
 
 // Sync funcitons.
 //
 // Global sync info
-// [ { wid: 'aabbaabb', tabs: [ { tid: 'ccddccdd', url: google.com }, ] }, ]
+// windows: {
+//   wids: [ 'aabbaabb', ],
+//   'aabbaabb': { tabs: [ 'ccddccdd', ] }
+// }
+//
+// tabs: {
+//   tids: [ 'ccddccdd', ],
+//   'ccddccdd': {
+//     wid: 'aabbaabb',
+//     url: 'google.com',
+//     pos: 1
+//   }
+// }
 //
 // Local window/tabb info
-// [ { wid: 'aabbaabb', id: 1, tabs: [ { tid: 'ccddccdd', id: 1, windowId: 1, url: google.com }, ] }, ]
+// windows: {
+//   wids: [ 'aabbaabb', ],
+//   'aabbaabb': {
+//     id: 1,
+//     tabs: [ 'ccddccdd', ]
+//   }
+// }
+//
+// tabs: {
+//   tids: [ 'ccddccdd', ],
+//   'ccddccdd': {
+//     id: 1,
+//     wid: 'aabbaabb',
+//     url: 'google.com',
+//     pos: 1
+//   }
+// }
 
 function syncAllWindows(window) {
-	console.log('syncAllWindows');
-	chrome.storage.sync.get(['windows'], result => {
-		var newWindows = [];
-		result.windows.forEach((windowObject, windowIndex, windowArr) => {
-			if (windowIndex == 0) {
-				let newTabs = [];
-				windowObject.tabs.forEach((tabObject, tabIndex, tabArr) => {
-					chrome.tabs.create({
-						url: tabObject.url,
-						windowId: window.id
-					}, createdTab => {
-						newTabs.push({
-							id: createdTab.id,
-							windowId: window.id,
-							url: createdTab.url
-						});
+	console.log("syncAllWindows", window);
+	if (syncInProcess) {
+		setTimeout(() => {
+			syncAllWindows(window);
+		}, 500);
+	} else {
+		console.log("syncAllWindows started: ", window);
+		syncInProcess = true;
+		let localSyncInfo = {};
+		let currentWindowSynced = false;
+		chrome.storage.sync.get(['windows', 'tabs'], result => {
+			return Promise.all(result.windows.wids.map(wid => {
+				return new Promise((resolveWindowObject, rejectWindowObject) => {
+					if (currentWindowSynced) {
+						currnetWindowSynced = true;
+						resolveWindowObject(window);
+					} else {
+						chrome.windows.create({ type: "normal" }, windowObject => resolveWindowObject(windowObject));
+					}
+				}).then(windowObject => {
+					if (typeof localSyncInfo.windows == "undefined") {
+						localSyncInfo.windows = {
+							wids: []
+						};
+					}
+					if (typeof localSyncInfo.tabs == "undefined") {
+						localSyncInfo.tabs = {
+							tids: []
+						};
+					}
+					localSyncInfo.windows.wids.push(wid);
+					localSyncInfo.windows[wid] = {
+						id: window.id,
+						wid: wid,
+						tabs: []
+					};
+					return new Promise((resolveTabClear, rejectTabClear) => {
+						if (typeof window.tabs != "undefined" ? window.tabs.length > 0 : false) { // Clear tabs in this window, before syncing
+							return Promise.all(window.tabs.map(tabId => {
+								return new Promise((resolveTabRemove, rejectTabRemove) => {
+									chrome.tabs.remove(tabId, () => resolveTabRemove());
+								});
+							})).then(() => resolveTabClear());
+						} else {
+							resolveTabClear();
+						}
+					}).then(() => {
+						if (typeof result.windows[wid].tabs == "undefined" ? true : result.windows[wid].tabs.length == 0) {
+							return;
+						} else {
+							return Promise.all(result.windows[wid].tabs.map(tid => {
+								return new Promise((resolveTabCreate, rejectTabCreate) => {
+									chrome.tabs.create({
+										windowId: window.id,
+										index: result.tabs[tid].pos,
+										url: result.tabs[tid].url
+									}, tab => {
+										localSyncInfo.windows[wid].tabs.push(tid);
+										localSyncInfo.tabs.tids.push(tid);
+										localSyncInfo.tabs[tid] = {
+											id: tab.id,
+											tid: tid,
+											wid: wid,
+											pos: tab.index,
+											url: tab.url
+										};
+										resolveTabCreate();
+									});
+								});
+							}));
+						}
 					});
 				});
-				newWindows.push({
-					id: window.id,
-					tabs: newTabs
+			})).then(() => {
+				chrome.storage.local.set({
+					windows: localSyncInfo.windows,
+					tabs: localSyncInfo.tabs
+				}, () => {
+					syncInProcess = false;
+					console.log("syncAllWindows done");
 				});
-			} else {
-				let newTabs = [];
-				chrome.windows.create({
-					type: "normal"
-				}, createdWindow => {
-					windowObject.tabs.forEach((tabObject, tabIndex, tabArr) => {
-						chrome.tabs.create({
-							url: tabObject.url,
-							windowId: createWindow.id
-						}, createdTab => {
-							newTabs.push({
-								id: createdTab.id,
-								windowId: createdWindow.id,
-								url: createdTab.url
-							});
-						});
-					});
-					newWindows.push({
-						id: createdWindow.id,
-						tabs: newTabs
-					});
-				});
-			}
+			});
 		});
-		chrome.storage.local.set({
-			windows: newWindows
-		});
-	});
+	}
 }
 
 function syncAddedWindow(window) {
-	let wid = generateUid(8);
-	chrome.storage.local.get(['windows'], result => {
-		console.log('localSync: ' + result.windows);
-		result.windows.push({
-			wid: wid,
-			id: window.id,
-			tabs: []
+	if (syncInProcess) {
+		setTimeout(() => {
+			syncAddedWindow(window);
+		}, 500);
+	} else {
+		syncInProcess = true;
+		console.log("syncAddedWindow started");
+		let wid = generateUid(8);
+		return new Promise((resolve, reject) => {
+			chrome.storage.local.get(['windows'], result => {
+				console.log('localSync: ' + result.windows);
+				if (typeof result.windows == "undefined") {
+					result.windows = {
+						wids: []
+					};
+				}
+				if (typeof result.windows.wids == "undefined") {
+					result.windows.wids = [];
+				}
+				result.windows.wids.push(wid);
+				result.windows[wid] = {
+					id: window.id,
+					wid: wid,
+					tabs: [],
+				}
+				chrome.storage.local.set({
+					windows: result.windows
+				}, () => resolve());
+			});
+		}).then(() => {
+			return new Promise((resolve, reject) => {
+				chrome.storage.sync.get(['windows'], result => {
+					console.log('globalSync: ' + result.windows);
+					if (typeof result.windows == "undefined") {
+						result.windows = {
+							wids: []
+						};
+					}
+					if (typeof result.windows.wids == "undefined") {
+						result.windows.wids = [];
+					}
+					result.windows.wids.push(wid);
+					result.windows[wid] = {
+						wid: wid,
+						tabs: [],
+					}
+					chrome.storage.sync.set({
+						windows: result.windows
+					}, () => resolve());
+				});
+			});
+		}).then(() => {
+			syncInProcess = false;
+			console.log("syncAddedWindow done");
 		});
-		chrome.storage.local.set({
-			windows: result.windows
-		});
-	});
-	chrome.storage.sync.get(['windows'], result => {
-		console.log('globalSync: ' + result.windows);
-		result.windows.push({
-			wid: wid,
-			tabs: []
-		});
-		chrome.storage.sync.set({
-			windows: result.windows
-		});
-	});
+	}
 }
 
 function syncRemovedWindow(windowId) {
-	let wid = '';
-	console.log('removeWindow: ' + windowId);
-	logCurrentLocalSyncInfo();
-	chrome.storage.local.get(['windows'], result => {
-		console.log('localSync: ' + result.windows);
-		if (typeof result.windows != "undefined") {
-			let foundIndex = result.windows.findIndex((obj => obj.id == windowId));
-			wid = result.windows[foundIndex].wid;
-			result.windows.splice(foundIndex, 1);
-			chrome.storage.local.set({
-				windows: result.windows
-			}, () => {
-				logCurrentLocalSyncInfo();
+	if (syncInProcess) {
+		setTimeout(() => {
+			syncRemovedWindow(windowId);
+		}, 500);
+	} else {
+		syncInProcess = true;
+		console.log("syncRemovedWindow started");
+		let wid = '';
+		return new Promise((resolve, reject) => {
+			console.log('removeWindow: ' + windowId);
+			logCurrentLocalSyncInfo();
+			chrome.storage.local.get(['windows', 'tabs'], result => {
+				console.log('localSync: ' + result.windows);
+				if (typeof result.windows != "undefined") {
+					wid = result.windows.wids.find(obj => {
+						return result.windows[obj].id == windowId;
+					});
+					result.windows.wids.splice(result.windows.wids.indexOf(wid), 1);
+					delete result.windows[wid];
+					chrome.storage.local.set({
+						windows: result.windows
+					}, () => {
+						logCurrentLocalSyncInfo();
+						resolve();
+					});
+				}
 			});
-		}
-	});
-	logCurrentGlobalSyncInfo();
-	chrome.storage.sync.get(['windows'], result => {
-		console.log('globalSync: ' + result.windows);
-		if (typeof result.windows != "undefined") {
-			let foundIndex = result.windows.findIndex((obj => obj.wid == wid));
-			result.windows.splice(foundIndex, 1);
-			chrome.storage.sync.set({
-				windows: result.windows
-			}, () => {
+		}).then(() => {
+			return new Promise((resolve, reject) => {
 				logCurrentGlobalSyncInfo();
+				chrome.storage.sync.get(['windows'], result => {
+					console.log('globalSync: ' + result.windows);
+					if (typeof result.windows != "undefined") {
+						result.windows.wids.splice(result.windows.wids.indexOf(wid), 1);
+						chrome.storage.sync.set({
+							windows: result.windows
+						}, () => {
+							logCurrentGlobalSyncInfo();
+							resolve();
+						});
+					}
+				});
 			});
-		}
-	});
+		}).then(() => {
+			syncInProcess = false;
+			console.log("syncRemovedWindow done");
+		});
+	}
 }
 
-function syncAddedTab(tabId, windowId, url) {
+function syncAddedTab(tabId, windowId, url, index) {
+	if (syncInProcess) {
+		setTimeout(() => {
+			syncAddedTab(tabId, windowId, url, index);
+		}, 500);
+	} else {
+		syncInProcess = true;
+		console.log("syncAddedTab started");
+		let tid = generateUid(8);
+		let wid = '';
+		return new Promise((resolve, reject) => {
+			chrome.storage.local.get(['windows', 'tabs'], result => {
+				if (typeof result.windows == "undefined") {
+					//syncInProcess = false;
+					console.log("delaying syncAddedTab");
+					setTimeout(() => {
+						syncAddedTab(tabId, windowId, url, index);
+					}, 500);
+					resolve(false);
+					return;
+				} else {
+					wid = result.windows.wids.find(obj => {
+						return result.windows[obj].id == windowId;
+					});
+					if (typeof wid == "undefined") {
+						console.log("delaying syncAddedTab");
+						setTimeout(() => {
+							syncAddedTab(tabId, windowId, url, index);
+						}, 500);
+						resolve(false);
+						return;
+					}
+					if (!result.windows[wid].tabs.includes(tid)) {
+						result.windows[wid].tabs.push(tid);
+					}
+					if (typeof result.tabs == "undefined") {
+						result.tabs = {
+							tids: []
+						};
+					}
+					if (typeof result.tabs.tids == "undefined") {
+						result.tabs.tids = [];
+					}
+					if (!result.tabs.tids.includes(tid)) {
+						result.tabs.tids.push(tid);
+					}
+					result.tabs[tid] = {
+						wid: wid,
+						tid: tid,
+						id: tabId,
+						url: url,
+						pos: index
+					};
+					chrome.storage.local.set({
+						windows: result.windows,
+						tabs: result.tabs
+					}, () => resolve(true));
+				}
+			});
+		}).then(keepGoing => {
+			if (keepGoing) {
+				return new Promise((resolve, reject) => {
+					chrome.storage.sync.get(['windows', 'tabs'], result => {
+						if (!result.windows[wid].tabs.includes(tid)) {
+							result.windows[wid].tabs.push(tid);
+						}
+						if (typeof result.tabs == "undefined") {
+							result.tabs = {
+								tids: []
+							};
+						}
+						if (typeof result.tabs.tids == "undefined") {
+							result.tabs.tids = [];
+						}
+						if (!result.tabs.tids.includes(tid)) {
+							result.tabs.tids.push(tid);
+						}
+						result.tabs[tid] = {
+							tid: tid,
+							wid: wid,
+							url: url,
+							pos: index
+						};
+						chrome.storage.sync.set({
+							windows: result.windows,
+							tabs: result.tabs
+						}, () => resolve());
+					});
+				});
+			} else {
+				return;
+			}
+		}).then(() => {
+			syncInProcess = false;
+			console.log("syncAddedTab done");
+		});
+	}
 }
 
-function syncRemovedTab(tabId, windowID) {
+function syncRemovedTab(tabId) {
+	if (syncInProcess) {
+		setTimeout(() => {
+			syncRemovedTab(tabId);
+		}, 500);
+	} else {
+		syncInProcess = true;
+		console.log("syncRemovedTab started");
+		let tid = '';
+		let wid = '';
+		return new Promise((resolve, reject) => {
+			console.log('removeTab: ' + tabId);
+			logCurrentLocalSyncInfo();
+			chrome.storage.local.get(['windows', 'tabs'], result => {
+				console.log('localSync: ' + result.windows);
+				if (typeof result.windows != "undefined" && typeof result.tabs != "undefined") {
+					tid = result.tabs.tids.find(obj => {
+						return result.tabs[obj].id == tabId;
+					});
+					wid = result.tabs[tid].wid;
+					result.windows[wid].tabs.splice(result.windows[wid].tabs.indexOf(tid), 1);
+					result.tabs.tids.splice(result.tabs.tids.indexOf(tid), 1);
+					delete result.tabs[tid];
+					chrome.storage.local.set({
+						windows: result.windows,
+						tabs: result.tabs
+					}, () => {
+						logCurrentLocalSyncInfo();
+						resolve();
+					});
+				}
+			});
+		}).then(() => {
+			return new Promise((resolve, reject) => {
+				logCurrentGlobalSyncInfo();
+				chrome.storage.sync.get(['windows', 'tabs'], result => {
+					console.log('globalSync: ' + result.windows);
+					if (typeof result.windows != "undefined") {
+						result.windows[wid].tabs.splice(result.windows[wid].tabs.indexOf(tid), 1);
+						result.tabs.tids.splice(result.tabs.tids.indexOf(tid), 1);
+						delete result.tabs[tid];
+						chrome.storage.sync.set({
+							windows: result.windows,
+							tabs: result.tabs
+						}, () => {
+							logCurrentGlobalSyncInfo();
+							resolve();
+						});
+					}
+				});
+			});
+		}).then(() => {
+			syncInProcess = false;
+			console.log("syncRemovedTab done");
+		});
+	}
 }
 
 // Sync event handlers
 
 function syncEventHandler(change, areaName) {
-	if (areaName == "sync" && typeof change.windows != "undefined") {
-		console.log('sync change: ', change);
-		if (typeof change.windows.oldValue == "undefined") { // If this is the fresh start
-			let newWindows = [];
-			change.windows.newValue.forEach(windowToCreate => {
-				chrome.windows.create({
-					type: "normal"
-				}, createdWindow => {
-					newWindows.push({
-						id: createdWindow.id,
-						wid: windowToCreate.wid,
-						tabs: []
-					});
-				});
-			});
-			chrome.storage.local.set({
-				windows: newWindows
-			});
-		} else {
-			chrome.storage.local.get(['windows'], result => {
-				if (typeof change.windows.newValue == "undefined") { // If all windows are gone
-					if (typeof result.windows == "undefined") { // Local windows are gone, too. That is, this event was probably triggered by local event.
-						return;
-					}
-					// Use Promise.all to ensure that all windows are removed before wiping storage.local.
-					Promise.all(result.windows.map(window => {
-						windowsRemovedBySync.push(window.id);
-						return new Promise((resolve, reject) => {
-							chrome.windows.remove(window.id, () => resolve());
+	// We don't want multiple sync handlers running at the same time.
+	if (syncInProcess) {
+		setTimeout(() => {
+			syncEventHandler(change, areaName);
+		}, 500);
+	} else if (areaName == "sync") {
+		syncInProcess = true;
+		console.log('syncChange ', change);
+		// Make whole codes as a promise for proper turning on/off of syncInProcess
+		return new Promise((rootResolve, rootReject) => {
+			// First get local sync info, to check if this event was triggered by local change.
+			chrome.storage.local.get(['windows', 'tabs'], result => {
+				if (typeof change.windows.oldValue == "undefined" &&
+					typeof change.windows.newValue == "undefined") { // Shoudn't be a possible case
+					console.log('exceptional change in syncInfo ', change);
+					rootResolve();
+				} else if (typeof change.windows.oldValue == "undefined") { // A fresh start.
+					if (typeof result.windows == "undefined") { // Not local event. Another device just started a new Chrome process.
+						console.log('Another machine created a new window (likely started a new Chrome process');
+						result.windows = {};
+						result.windows.wids = [];
+						// Use Promise.all to set storage.local after handling all windows.
+						Promise.all(change.windows.newValue.wids.map(wid => {
+							return new Promise((resolve, reject) => {
+								windowsAddedBySync.push({ wid: wid });
+								chrome.windows.create({ type: "normal" }, window => {
+									windowsAddedBySync.find(obj => obj.wid == wid).id = window.id;
+									result.windows.wids.push(wid);
+									result.windows[wid] = {
+										wid: wid,
+										id: window.id,
+										tabs: []
+									};
+									if (change.windows.newValue[wid].tabs.length > 0) { // There are tabs to create, too
+										Promise.all(change.windows.newValue[wid].tabs.map(tid => {
+											tabsAddedBySync.push({ tid: tid });
+											return new Promise((resolve2, reject2) => {
+												chrome.tabs.create({
+													windowId: window.id,
+													url: change.tabs.newValue[tid].url,
+													index: change.tabs.newValue[tid].pos
+												}, tab => {
+													tabsAddedBySync.find(obj => obj.tid == tid).id = tab.id;
+													result.tabs.tids.push(tid);
+													result.tabs[tid] = {
+														id: tab.id,
+														tid: tid,
+														wid: wid,
+														pos: tab.index,
+														url: tab.url
+													};
+													result.windows[wid].tabs.push(tid);
+													resolve2();
+												})
+											});
+										})).then(() => resolve());
+									} else {
+										resolve();
+									}
+								});
+							});
+						})).then(() => {
+							chrome.storage.local.set({
+								windows: result.windows
+							}, () => rootResolve());
 						});
-					})).then(() => {
-						chrome.storage.local.clear();
-					});
-				} else if (change.windows.newValue.length == result.windows.length) { // Nothing to sync. Handler probably triggered by local event.
-					// Do nothing
-				} else { // If window created/removed
-					if (change.windows.newValue.length > change.windows.oldValue.length) { // A new window created
-						let diffWindow = change.windows.newValue.find(window => {
-							return change.windows.oldValue.every(window2 => {
-								return window2.wid != window.wid;
+					} else { // Local event. User just started a new Chrome process.
+						// Do nothing. All sync should have been done in windowCreateHandler.
+						console.log('This device created a new window (likely started a new Chrome process)');
+						rootResolve();
+					}
+				} else if (typeof change.windows.newValue == "undefined") { // All windows are gone.
+					if (typeof result.windows == "undefined") { // Local event. User just exited the last window.
+						// Do nothing. All sync should have been done in windowRemoveHandler.
+						console.log("Seems like this device's Chrome has been shut down");
+						// TODO: Is this ok?
+						chrome.storage.local.clear(() => {
+							chrome.storage.sync.clear(() => {
+								rootResolve();
 							});
 						});
-						// Register new entry for windows that was created by sync handler.
-						// After the window was created, tag window ID to the entry.
-						// The windowCreateHandler is waiting until all entires are tagged.
-						// If if finds a matching window ID, it will skip syncing the newly created window.
-						windowsAddedBySync.push({wid: diffWindow.wid});
-						chrome.windows.create({
-							type: "normal"
-						}, window => {
-							newWindow = windowsAddedBySync.find(obj => obj.wid == diffWindow.wid);
-							if (typeof newWindow != "undefined") {
-								newWindow.id = window.id;
+						//rootResolve();
+					} else { // Not Local event. Another device just closed its (last) Chrome window.
+						console.log("Another device just closed its (last) Chrome window");
+						Promise.all(result.windows.wids.map(wid => {
+							let tabId = -1;
+							// First, close all tabs attached to this window.
+							return Promise.all(result.windows[wid].tabs.map(tid => {
+								tabsRemovedBySync.push(tid);
+								tabId = result.tabs[tid].id;
+								result.windows[wid].tabs.splice(result.windows[wid].tabs.indexOf(tid), 1);
+								result.tabs.tids.splice(result.tabs.tids.indexOf(tid), 1);
+								delete result.tabs[tid];
+								return new Promise((resolve, reject) => {
+									chrome.tabs.remove(tabId, () => {
+										resolve();
+									});
+								});
+							})).then(() => { // All tabs attached to this window are closed.
+								let windowId = -1;
+								windowId = result.windows[wid].id;
+								result.windows.wids.splice(result.windows.wids.indexOf(wid), 1);
+								delete result.windows[wid];
+								return new Promise((resolve, reject) => {
+									chrome.windows.remove(windowId, () => resolve());
+								});
+							});
+						})).then(() => {
+							chrome.storage.local.set({
+								windows: result.widows
+							}, () => rootResolve());
+						});
+					}
+				} else { // Window/tab created or removed.
+					console.log("Window/tab created or removed");
+					// First, check if there's a new window created.
+					Promise.all(change.windows.newValue.wids.map(wid => {
+						if (!change.windows.oldValue.wids.includes(wid)) { // New window
+							console.log("A new window created");
+							if (typeof result.windows == "undefined" ? true : !result.windows.wids.includes(wid)) { // Not local event
+								console.log("A new window created in another device");
+								return new Promise((resolve, reject) => {
+									chrome.windows.create({ type: "normal" }, window => {
+										result.windows.wids.push(wid);
+										result.windows[wid] = {
+											id: window.id,
+											wid: wid,
+											tabs: []
+										};
+										resolve();
+									});
+								});
 							}
-							result.windows.push({
-								wid: diffWindow.wid,
-								id: window.id,
-								tabs: []
-							});
-							chrome.storage.local.set({
-								windows: result.windows
-							});
-						});
-					} else if (change.windows.newValue.length < change.windows.oldValue.length) { // A window removed
-						let diffWindow = change.windows.oldValue.find(window => {
-							return change.windows.newValue.every(window2 => {
-								return window2.wid != window.wid;
-							});
-						});
-						let windowToRemove = result.windows.find(obj => obj.wid == diffWindow.wid);
-						windowsRemovedBySync.push(windowToRemove.id);
-						chrome.windows.remove(windowToRemove.id, () => {
-							result.windows.splice(result.windows.indexOf(windowToRemove), 1);
-							chrome.storage.local.set({
-								windows: result.windows
-							});
-						});
-					}
+						}
+					})).then(() => { // Then check if tab changed.
+						let promises = [];
+						if (typeof change.tabs != "undefined") {
+							if (typeof change.tabs.newValue == "undefined") { // All tabs are gone.
+								change.tabs.oldValue.tids.forEach(tid => {
+									if (typeof result.tabs != "undefined") {
+										if (result.tabs.tids.includes(tid)) {
+											promises.push(new Promise((resolve, reject) => {
+												tabsRemovedBySync.push(tid);
+												let wid = result.tabs[tid].wid;
+												result.windows[wid].tabs.splice(result.windows[wid].tabs.indexOf(tid), 1);
+												result.tabs.tids.splice(result.tabs.tids.indexOf(tid), 1);
+												delete result.tabs[tid];
+												chrome.tabs.remove(tid, () => resolve());
+											}));
+										}
+									}
+								});
+							} else if ( typeof change.tabs.oldValue == "undefined") { // All tabs are fresh.
+								if (typeof result.tabs == "undefined") {
+									result.tabs = {
+										tids: []
+									};
+								} else if (typeof result.tabs.tids == "undefined") {
+									result.tabs.tids = [];
+								}
+								change.tabs.newValue.tids.forEach(tid => {
+									if (!result.tabs.tids.includes(tid)) { // Not local event
+										console.log("Another device created fresh tabs");
+										promises.push(new Promise((resolve, reject) => {
+											tabsAddedBySync.push({ tid: tid });
+											let wid = change.tabs.newValue[tid].wid;
+											chrome.tabs.create({
+												windowId: result.windows[wid].id,
+												index: change.tabs.newValue[tid].pos,
+												url: change.tabs.newValue[tid].url
+											}, tab => {
+												tabsAddedBySync.find(obj => obj.tid == tid).id = tab.id;
+												result.windows[wid].tabs.push(tid);
+												result.tabs.tids.push(tid);
+												result.tabs[tid] = {
+													id: tab.id,
+													tid: tid,
+													wid: wid,
+													pos: tab.index,
+													url: tab.url
+												};
+												resolve();
+											});
+										}));
+									}
+								});
+							} else {
+								console.log("Some changes in tabs");
+								change.tabs.newValue.tids.forEach(tid => { // First, look for new tabs.
+									if (!change.tabs.oldValue.tids.includes(tid)) { // New tab created
+										if (typeof result.tabs == "undefined" ? true : !result.tabs.tids.includes(tid)) { // Not local event
+											console.log("change: ");
+											console.log(change);
+											console.log("result: ");
+											console.log(result);
+											console.log("Another device created new tabs");
+											if (typeof result.tabs == "undefined") {
+												result.tabs = {
+													tids: []
+												};
+											}
+											promises.push(new Promise((resolve, reject) => {
+												tabsAddedBySync.push({ tid: tid});
+												chrome.tabs.create({
+													windowId: result.windows[change.tabs.newValue[tid].wid].id,
+													index: change.tabs.newValue[tid].pos,
+													url: change.tabs.newValue[tid].url
+												}, tab => {
+													tabsAddedBySync.find(obj => obj.tid == tid).id = tab.id;
+													result.windows[change.tabs.newValue[tid].wid].tabs.push(tid);
+													result.tabs.tids.push(tid);
+													result.tabs[tid] = {
+														id: tab.id,
+														tid: tid,
+														wid: change.tabs.newValue[tid].wid,
+														pos: tab.index,
+														url: tab.url
+													};
+													resolve();
+												});
+											}));
+										}
+									}
+								});
+								change.tabs.oldValue.tids.forEach(tid => { // Look for removed tabs.
+									if (!change.tabs.newValue.tids.includes(tid)) { // Tab removed
+										if (typeof result.tabs == "undefined" ? false : result.tabs.tids.includes(tid)) { // Not local event
+											console.log("Another device removed tabs");
+											promises.push(new Promise((resolve, reject) => {
+												tabsRemovedBySync.push(tid);
+												chrome.tabs.remove(tid, () => {
+													let wid = result.tabs[tid].wid;
+													result.windows[wid].tabs.splice(result.windows[wid].tabs.indexOf(tid), 1);
+													result.tabs.tids.splice(result.tabs.tids.indexOf(tid), 1);
+													delete result.tabs[tid];
+													resolve();
+												});
+											}));
+										}
+									}
+								});
+							}
+						}
+						return Promise.all(promises);
+					}).then(() => { // Check for removed windows
+						return Promise.all(change.windows.oldValue.wids.map(wid => {
+							if (!change.windows.newValue.wids.includes(wid)) { // Removed window
+								if (typeof result.windows == "undefined" ? false : result.windows.wids.includes(wid)) { // Not local event
+									console.log("Another device removed a window");
+									if (result.windows[wid].tabs.length != 0) {
+										console.log('Error!! Why there\'re tabs remaining??');
+									}
+									return new Promise((resolve, reject) => {
+										windowsRemovedBySync.push(wid);
+										chrome.windows.remove(wid, () => {
+											resolve();
+										});
+									});
+								}
+							}
+						}));
+					}).then(() => {
+						chrome.storage.local.set({
+							windows: result.windows,
+							tabs: result.tabs
+						}, () => rootResolve());
+					});
 				}
 			});
-		}
+		}).then(() => {
+			syncInProcess = false;
+			console.log("Sync done");
+		});
+	} else {
+		console.log('localChange ', change);
 	}
 }
 
@@ -371,16 +864,31 @@ function generateUid(len) {
 	return r;
 };
 
+function clearSyncInfo() {
+	if (syncInProcess) {
+		setTimeout(() => {
+			clearSyncInfo();
+		}, 500);
+	} else {
+		syncInProcess = true;
+		chrome.storage.local.clear(() => {
+			chrome.storage.sync.clear(() => {
+				syncInProcess = false;
+			});
+		});
+	}
+}
+
 // Debug functions
 function logCurrentLocalSyncInfo() {
-	chrome.storage.local.get(['windows'], result => {
-		console.log('LocalSyncInfo: ', result.windows);
+	chrome.storage.local.get(['windows', 'tabs'], result => {
+		console.log('LocalSyncInfo: ', result);
 	});
 }
 
 function logCurrentGlobalSyncInfo() {
-	chrome.storage.sync.get(['windows'], result => {
-		console.log('GlobalSyncInfo: ', result.windows);
+	chrome.storage.sync.get(['windows', 'tabs'], result => {
+		console.log('GlobalSyncInfo: ', result);
 	});
 }
 
@@ -394,4 +902,6 @@ function wipeGlobalSyncInfo() {
 
 chrome.windows.onCreated.addListener(windowCreateHandler);
 chrome.windows.onRemoved.addListener(windowRemoveHandler);
+chrome.tabs.onCreated.addListener(tabCreateHandler);
+chrome.tabs.onRemoved.addListener(tabRemoveHandler);
 chrome.storage.onChanged.addListener(syncEventHandler);
