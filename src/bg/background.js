@@ -398,7 +398,8 @@ function syncRemovedWindow(windowId) {
 					result.windows.wids.splice(result.windows.wids.indexOf(wid), 1);
 					delete result.windows[wid];
 					chrome.storage.local.set({
-						windows: result.windows
+						windows: result.windows,
+						tabs: result.tabs
 					}, () => {
 						logCurrentLocalSyncInfo();
 						resolve();
@@ -423,7 +424,8 @@ function syncRemovedWindow(windowId) {
 						}
 						result.windows.wids.splice(result.windows.wids.indexOf(wid), 1);
 						chrome.storage.sync.set({
-							windows: result.windows
+							windows: result.windows,
+							tabs: result.tabs
 						}, () => {
 							logCurrentGlobalSyncInfo();
 							resolve();
@@ -556,6 +558,11 @@ function syncRemovedTab(tabId) {
 					tid = result.tabs.tids.find(obj => {
 						return result.tabs[obj].id == tabId;
 					});
+					if (typeof result.tabs[tid] == "undefined") {
+						console.log("Cannot find tab with tid: ", tid);
+						reject();
+						return;
+					}
 					wid = result.tabs[tid].wid;
 					result.windows[wid].tabs.splice(result.windows[wid].tabs.indexOf(tid), 1);
 					result.tabs.tids.splice(result.tabs.tids.indexOf(tid), 1);
@@ -620,17 +627,19 @@ function syncEventHandler(change, areaName) {
 						result.windows = {};
 						result.windows.wids = [];
 						// Use Promise.all to set storage.local after handling all windows.
-						Promise.all(change.windows.newValue.wids.map(wid => {
+						return Promise.all(change.windows.newValue.wids.map(wid => {
 							return new Promise((resolve, reject) => {
 								windowsAddedBySync.push({ wid: wid });
 								// Get the first tab, there should be at least one tab.
 								if (change.windows.newValue[wid].tabs.length == 0) {
 									console.log("Error!!!! Why no tab associated with this window? ", change.windows.newValue[wid]);
+									reject();
 									return;
 								}
 								let firstTid = change.windows.newValue[wid].tabs[0];
 								if (typeof change.tabs.newValue[firstTid] == "undefined") {
 									console.log("Error!!! Why this window's first tab not in sync.tabs?? ", change.tabs.newValue);
+									reject();
 									return;
 								}
 								let firstTab = change.tabs.newValue[firstTid];
@@ -717,7 +726,8 @@ function syncEventHandler(change, areaName) {
 							});
 						})).then(() => {
 							chrome.storage.local.set({
-								windows: result.windows
+								windows: result.windows,
+								tabs: result.tabs
 							}, () => rootResolve());
 						});
 					} else { // Local event. User just started a new Chrome process.
@@ -738,7 +748,7 @@ function syncEventHandler(change, areaName) {
 						//rootResolve();
 					} else { // Not Local event. Another device just closed its (last) Chrome window.
 						console.log("Another device just closed its (last) Chrome window");
-						Promise.all(result.windows.wids.map(wid => {
+						return Promise.all(result.windows.wids.map(wid => {
 							let tabId = -1;
 							// First, close all tabs attached to this window.
 							return Promise.all(result.windows[wid].tabs.map(tid => {
@@ -766,16 +776,22 @@ function syncEventHandler(change, areaName) {
 								});
 							});
 						})).then(() => {
-							chrome.storage.local.set({
+							/*chrome.storage.local.set({
 								windows: result.widows,
 								tabs: result.tabs
-							}, () => rootResolve());
+							}, () => rootResolve());*/
+							// Let's just wipe storage
+							chrome.storage.local.clear(() => {
+								chrome.storage.sync.clear(() => {
+									rootResolve();
+								});
+							});
 						});
 					}
 				} else { // Window/tab created or removed.
 					console.log("Window/tab created or removed");
 					// First, check if there's a new window created.
-					Promise.all(change.windows.newValue.wids.map(wid => {
+					return Promise.all(change.windows.newValue.wids.map(wid => {
 						if (!change.windows.oldValue.wids.includes(wid)) { // New window
 							console.log("A new window created");
 							if (typeof result.windows == "undefined" ? true : !result.windows.wids.includes(wid)) { // Not local event
@@ -822,94 +838,54 @@ function syncEventHandler(change, areaName) {
 							}
 						}
 					})).then(() => { // Then check if tab changed.
-						let promises = [];
-						if (typeof change.tabs != "undefined") {
-							if (typeof change.tabs.newValue == "undefined") { // All tabs are gone.
-								change.tabs.oldValue.tids.forEach(tid => {
-									if (typeof result.tabs != "undefined") {
-										if (result.tabs.tids.includes(tid)) {
-											promises.push(new Promise((resolve, reject) => {
-												tabsRemovedBySync.push(tid);
-												let wid = result.tabs[tid].wid;
-												result.windows[wid].tabs.splice(result.windows[wid].tabs.indexOf(tid), 1);
-												result.tabs.tids.splice(result.tabs.tids.indexOf(tid), 1);
-												delete result.tabs[tid];
-												chrome.tabs.remove(tid, () => resolve());
-											}));
+						return new Promise((resolveTabs, rejectTabs) => {
+							let promises = [];
+							if (typeof change.tabs != "undefined") {
+								if (typeof change.tabs.newValue == "undefined") { // All tabs are gone.
+									change.tabs.oldValue.tids.forEach(tid => {
+										if (typeof result.tabs != "undefined") {
+											if (result.tabs.tids.includes(tid)) {
+												promises.push(new Promise((resolve, reject) => {
+													tabsRemovedBySync.push(tid);
+													let wid = result.tabs[tid].wid;
+													result.windows[wid].tabs.splice(result.windows[wid].tabs.indexOf(tid), 1);
+													result.tabs.tids.splice(result.tabs.tids.indexOf(tid), 1);
+													delete result.tabs[tid];
+													chrome.tabs.remove(tid, () => resolve());
+												}));
+											}
 										}
+									});
+								} else if ( typeof change.tabs.oldValue == "undefined") { // All tabs are fresh.
+									if (typeof result.tabs == "undefined") {
+										result.tabs = {
+											tids: []
+										};
+									} else if (typeof result.tabs.tids == "undefined") {
+										result.tabs.tids = [];
 									}
-								});
-							} else if ( typeof change.tabs.oldValue == "undefined") { // All tabs are fresh.
-								if (typeof result.tabs == "undefined") {
-									result.tabs = {
-										tids: []
-									};
-								} else if (typeof result.tabs.tids == "undefined") {
-									result.tabs.tids = [];
-								}
-								change.tabs.newValue.tids.forEach(tid => {
-									if (!result.tabs.tids.includes(tid)) { // Not local event, or already handled
-										console.log("Another device created fresh tabs");
-										promises.push(new Promise((resolve, reject) => {
-											tabsAddedBySync.push({ tid: tid });
-											let wid = change.tabs.newValue[tid].wid;
-											let url = change.tabs.newValue[tid].url;
-											if (url == "") {
-												url = newTabUrl;
-											}
-											chrome.tabs.create({
-												windowId: result.windows[wid].id,
-												index: change.tabs.newValue[tid].pos,
-												url: url
-											}, tab => {
-												tabsAddedBySync.find(obj => obj.tid == tid).id = tab.id;
-												result.windows[wid].tabs.push(tid);
-												result.tabs.tids.push(tid);
-												result.tabs[tid] = {
-													id: tab.id,
-													tid: tid,
-													wid: wid,
-													pos: tab.index,
-													url: tab.url
-												};
-												resolve();
-											});
-										}));
-									}
-								});
-							} else {
-								console.log("Some changes in tabs");
-								change.tabs.newValue.tids.forEach(tid => { // First, look for new tabs.
-									if (!change.tabs.oldValue.tids.includes(tid)) { // New tab created
-										if (typeof result.tabs == "undefined" ? true : !result.tabs.tids.includes(tid)) { // Not local event, or already handled
-											console.log("change: ");
-											console.log(change);
-											console.log("result: ");
-											console.log(result);
-											console.log("Another device created new tabs");
-											if (typeof result.tabs == "undefined") {
-												result.tabs = {
-													tids: []
-												};
-											}
+									change.tabs.newValue.tids.forEach(tid => {
+										if (!result.tabs.tids.includes(tid)) { // Not local event, or already handled
+											console.log("Another device created fresh tabs");
 											promises.push(new Promise((resolve, reject) => {
-												tabsAddedBySync.push({ tid: tid});
+												tabsAddedBySync.push({ tid: tid });
+												let wid = change.tabs.newValue[tid].wid;
 												let url = change.tabs.newValue[tid].url;
 												if (url == "") {
 													url = newTabUrl;
 												}
 												chrome.tabs.create({
-													windowId: result.windows[change.tabs.newValue[tid].wid].id,
+													windowId: result.windows[wid].id,
 													index: change.tabs.newValue[tid].pos,
 													url: url
 												}, tab => {
 													tabsAddedBySync.find(obj => obj.tid == tid).id = tab.id;
-													result.windows[change.tabs.newValue[tid].wid].tabs.push(tid);
+													result.windows[wid].tabs.push(tid);
 													result.tabs.tids.push(tid);
 													result.tabs[tid] = {
 														id: tab.id,
 														tid: tid,
-														wid: change.tabs.newValue[tid].wid,
+														wid: wid,
 														pos: tab.index,
 														url: tab.url
 													};
@@ -917,28 +893,72 @@ function syncEventHandler(change, areaName) {
 												});
 											}));
 										}
-									}
-								});
-								change.tabs.oldValue.tids.forEach(tid => { // Look for removed tabs.
-									if (!change.tabs.newValue.tids.includes(tid)) { // Tab removed
-										if (typeof result.tabs == "undefined" ? false : result.tabs.tids.includes(tid)) { // Not local event
-											console.log("Another device removed tabs");
-											promises.push(new Promise((resolve, reject) => {
-												tabsRemovedBySync.push(tid);
-												chrome.tabs.remove(tid, () => {
-													let wid = result.tabs[tid].wid;
-													result.windows[wid].tabs.splice(result.windows[wid].tabs.indexOf(tid), 1);
-													result.tabs.tids.splice(result.tabs.tids.indexOf(tid), 1);
-													delete result.tabs[tid];
-													resolve();
-												});
-											}));
+									});
+								} else {
+									console.log("Some changes in tabs");
+									change.tabs.newValue.tids.forEach(tid => { // First, look for new tabs.
+										if (!change.tabs.oldValue.tids.includes(tid)) { // New tab created
+											if (typeof result.tabs == "undefined" ? true : !result.tabs.tids.includes(tid)) { // Not local event, or already handled
+												console.log("change: ");
+												console.log(change);
+												console.log("result: ");
+												console.log(result);
+												console.log("Another device created new tabs");
+												if (typeof result.tabs == "undefined") {
+													result.tabs = {
+														tids: []
+													};
+												}
+												promises.push(new Promise((resolve, reject) => {
+													tabsAddedBySync.push({ tid: tid});
+													let url = change.tabs.newValue[tid].url;
+													if (url == "") {
+														url = newTabUrl;
+													}
+													chrome.tabs.create({
+														windowId: result.windows[change.tabs.newValue[tid].wid].id,
+														index: change.tabs.newValue[tid].pos,
+														url: url
+													}, tab => {
+														tabsAddedBySync.find(obj => obj.tid == tid).id = tab.id;
+														result.windows[change.tabs.newValue[tid].wid].tabs.push(tid);
+														result.tabs.tids.push(tid);
+														result.tabs[tid] = {
+															id: tab.id,
+															tid: tid,
+															wid: change.tabs.newValue[tid].wid,
+															pos: tab.index,
+															url: tab.url
+														};
+														resolve();
+													});
+												}));
+											}
 										}
-									}
-								});
+									});
+									change.tabs.oldValue.tids.forEach(tid => { // Look for removed tabs.
+										if (!change.tabs.newValue.tids.includes(tid)) { // Tab removed
+											if (typeof result.tabs == "undefined" ? false : result.tabs.tids.includes(tid)) { // Not local event
+												console.log("Another device removed tabs");
+												promises.push(new Promise((resolve, reject) => {
+													tabsRemovedBySync.push(tid);
+													chrome.tabs.remove(tid, () => {
+														let wid = result.tabs[tid].wid;
+														result.windows[wid].tabs.splice(result.windows[wid].tabs.indexOf(tid), 1);
+														result.tabs.tids.splice(result.tabs.tids.indexOf(tid), 1);
+														delete result.tabs[tid];
+														resolve();
+													});
+												}));
+											}
+										}
+									});
+								}
 							}
-						}
-						return Promise.all(promises);
+							resolveTabs(promises);
+						}).then(promises => {
+							return Promise.all(promises);
+						});
 					}).then(() => { // Check for removed windows
 						return Promise.all(change.windows.oldValue.wids.map(wid => {
 							if (!change.windows.newValue.wids.includes(wid)) { // Removed window
@@ -951,7 +971,7 @@ function syncEventHandler(change, areaName) {
 										windowsRemovedBySync.push(wid);
 										if (typeof result.windows[wid] == "undefined") {
 											console.log("Cannot find window with wid: ", wid);
-											resolve();
+											reject();
 											return;
 										}
 										chrome.windows.remove(result.windows[wid].id, () => {
@@ -965,7 +985,7 @@ function syncEventHandler(change, areaName) {
 						chrome.storage.local.set({
 							windows: result.windows,
 							tabs: result.tabs
-						}, () => rootResolve());
+						}, () => rootResolve() );
 					});
 				}
 			});
