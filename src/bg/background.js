@@ -760,13 +760,39 @@ function syncEventHandler(change, areaName) {
 								console.log("A new window created in another device");
 								return new Promise((resolve, reject) => {
 									windowsAddedBySync.push({ wid: wid });
-									chrome.windows.create({ type: "normal" }, window => {
+									let firstTid = change.windows.newValue[wid].tabs[0];
+									let firstUrl = change.tabs.newValue[firstTid].url;
+									if (firstUrl == "") {
+										firstUrl = newTabUrl;
+									}
+									tabsAddedBySync.push({ tid: firstTid });
+									chrome.windows.create({
+										type: "normal",
+										url: firstUrl
+									}, window => {
 										windowsAddedBySync.find(obj => obj.wid == wid).id = window.id;
+										tabsAddedBySync.find(obj => obj.tid == firstTid).id = window.tabs[0].id;
 										result.windows.wids.push(wid);
 										result.windows[wid] = {
 											id: window.id,
 											wid: wid,
-											tabs: []
+											tabs: [firstTid]
+										};
+										if (typeof result.tabs == "undefined") {
+											result.tabs = {
+												tids: []
+											};
+										}
+										if (typeof result.tabs.tids == "undefined") {
+											result.tabs.tids = [];
+										}
+										result.tabs.tids.push(firstTid);
+										result.tabs[firstTid] = {
+											id: window.tabs[0].id,
+											tid: firstTid,
+											wid: wid,
+											url: firstUrl,
+											pos: 0
 										};
 										resolve();
 									});
@@ -800,7 +826,7 @@ function syncEventHandler(change, areaName) {
 									result.tabs.tids = [];
 								}
 								change.tabs.newValue.tids.forEach(tid => {
-									if (!result.tabs.tids.includes(tid)) { // Not local event
+									if (!result.tabs.tids.includes(tid)) { // Not local event, or already handled
 										console.log("Another device created fresh tabs");
 										promises.push(new Promise((resolve, reject) => {
 											tabsAddedBySync.push({ tid: tid });
@@ -833,7 +859,7 @@ function syncEventHandler(change, areaName) {
 								console.log("Some changes in tabs");
 								change.tabs.newValue.tids.forEach(tid => { // First, look for new tabs.
 									if (!change.tabs.oldValue.tids.includes(tid)) { // New tab created
-										if (typeof result.tabs == "undefined" ? true : !result.tabs.tids.includes(tid)) { // Not local event
+										if (typeof result.tabs == "undefined" ? true : !result.tabs.tids.includes(tid)) { // Not local event, or already handled
 											console.log("change: ");
 											console.log(change);
 											console.log("result: ");
