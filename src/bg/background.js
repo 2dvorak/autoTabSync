@@ -235,7 +235,11 @@ function syncAllWindows(window) {
 						currnetWindowSynced = true;
 						resolveWindowObject(window);
 					} else {
-						chrome.windows.create({ type: "normal" }, windowObject => resolveWindowObject(windowObject));
+						windowsAddedBySync.push({ wid: wid });
+						chrome.windows.create({ type: "normal" }, windowObject => {
+							windowsAddedBySync.find(obj => obj.wid == wid).id = windowObject.id;
+							resolveWindowObject(windowObject)
+						});
 					}
 				}).then(windowObject => {
 					if (typeof localSyncInfo.windows == "undefined") {
@@ -258,6 +262,8 @@ function syncAllWindows(window) {
 						if (typeof window.tabs != "undefined" ? window.tabs.length > 0 : false) { // Clear tabs in this window, before syncing
 							return Promise.all(window.tabs.map(tabId => {
 								return new Promise((resolveTabRemove, rejectTabRemove) => {
+									// Though this isn't because of another device removed a tab, we don't have to sync this event.
+									tabsRemovedBySync.push(tabId);
 									chrome.tabs.remove(tabId, () => resolveTabRemove());
 								});
 							})).then(() => resolveTabClear());
@@ -274,11 +280,13 @@ function syncAllWindows(window) {
 									if (url == "") {
 										url = newTabUrl;
 									}
+									tabsAddedBySync.push({ tid: tid });
 									chrome.tabs.create({
 										windowId: window.id,
 										index: result.tabs[tid].pos,
 										url: url
 									}, tab => {
+										tabsAddedBySync.find(obj => obj.tid == tid).id = tab.id;
 										localSyncInfo.windows[wid].tabs.push(tid);
 										localSyncInfo.tabs.tids.push(tid);
 										localSyncInfo.tabs[tid] = {
@@ -756,8 +764,8 @@ function syncEventHandler(change, areaName) {
 									console.log("Cannot find tab with tid: ", tid);
 									return;
 								}
-								tabsRemovedBySync.push(tid);
 								tabId = result.tabs[tid].id;
+								tabsRemovedBySync.push(tabId);
 								result.windows[wid].tabs.splice(result.windows[wid].tabs.indexOf(tid), 1);
 								result.tabs.tids.splice(result.tabs.tids.indexOf(tid), 1);
 								delete result.tabs[tid];
@@ -769,6 +777,7 @@ function syncEventHandler(change, areaName) {
 							})).then(() => { // All tabs attached to this window are closed.
 								let windowId = -1;
 								windowId = result.windows[wid].id;
+								windowsRemovedBySync.push(windowId);
 								result.windows.wids.splice(result.windows.wids.indexOf(wid), 1);
 								delete result.windows[wid];
 								return new Promise((resolve, reject) => {
@@ -846,12 +855,13 @@ function syncEventHandler(change, areaName) {
 										if (typeof result.tabs != "undefined") {
 											if (result.tabs.tids.includes(tid)) {
 												promises.push(new Promise((resolve, reject) => {
-													tabsRemovedBySync.push(tid);
+													let tabId = result.tabs[tid].id;
 													let wid = result.tabs[tid].wid;
+													tabsRemovedBySync.push(tabId);
 													result.windows[wid].tabs.splice(result.windows[wid].tabs.indexOf(tid), 1);
 													result.tabs.tids.splice(result.tabs.tids.indexOf(tid), 1);
 													delete result.tabs[tid];
-													chrome.tabs.remove(tid, () => resolve());
+													chrome.tabs.remove(tabId, () => resolve());
 												}));
 											}
 										}
@@ -941,8 +951,9 @@ function syncEventHandler(change, areaName) {
 											if (typeof result.tabs == "undefined" ? false : result.tabs.tids.includes(tid)) { // Not local event
 												console.log("Another device removed tabs");
 												promises.push(new Promise((resolve, reject) => {
-													tabsRemovedBySync.push(tid);
-													chrome.tabs.remove(tid, () => {
+													let tabId = result.tabs[tid].id;
+													tabsRemovedBySync.push(tabId);
+													chrome.tabs.remove(tabId, () => {
 														let wid = result.tabs[tid].wid;
 														result.windows[wid].tabs.splice(result.windows[wid].tabs.indexOf(tid), 1);
 														result.tabs.tids.splice(result.tabs.tids.indexOf(tid), 1);
@@ -968,12 +979,12 @@ function syncEventHandler(change, areaName) {
 										console.log('Error!! Why there\'re tabs remaining??');
 									}
 									return new Promise((resolve, reject) => {
-										windowsRemovedBySync.push(wid);
 										if (typeof result.windows[wid] == "undefined") {
 											console.log("Cannot find window with wid: ", wid);
 											reject();
 											return;
 										}
+										windowsRemovedBySync.push(result.windows[wid].id);
 										chrome.windows.remove(result.windows[wid].id, () => {
 											resolve();
 										});
