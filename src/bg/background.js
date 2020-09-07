@@ -766,7 +766,7 @@ function syncEventHandler(change, areaName) {
 							console.log("Closing tabs for wid: ", wid);
 							console.log("Tabs to be closed: ", result.windows[wid].tabs);
 							// First, close all tabs attached to this window.
-							let windowId = -1;
+							let windowId = result.windows[wid].id;
 							windowsRemovedBySync.push(windowId); // Closing all tab might remove the window, too
 							// Looping through result.windows[wid].tabs and splice it in the loop caused wrong behavior.
 							// FIXME: Correct other similar codes!!
@@ -789,16 +789,14 @@ function syncEventHandler(change, areaName) {
 									});
 								});
 							})).then(() => { // All tabs attached to this window are closed.
-								windowId = result.windows[wid].id;
-								console.log("Closing window after all tabs closed, wid: " + wid + ", windowId: " + windowId);
+								console.log("Closed all tabs for window wid: " + wid + ", windowId: " + windowId);
+								console.log("This window will be automatically shut down. If I manually remove that, it will cause the next new window to create previously existed tabs.");
 								// This was handled above.
 								//windowsRemovedBySync.push(windowId);
 								result.windows.wids.splice(result.windows.wids.indexOf(wid), 1);
 								delete result.windows[wid];
-								console.log("Removing a window after its last tab was closed. Would it be OK?");
-								return new Promise((resolve, reject) => {
-									chrome.windows.remove(windowId, () => resolve());
-								});
+								// Do not chrome.windows.remove() here, because that somehow causes the next new window to create priviously existed tabs.
+								return;
 							});
 						})).then(() => {
 							/*chrome.storage.local.set({
