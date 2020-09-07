@@ -120,7 +120,7 @@ function windowRemoveHandler(windowId) {
 	if (windowsRemovedBySync.includes(windowId)) {
 		console.log("window removed by sync handler: ", windowId);
 		windowsRemovedBySync.splice(windowsRemovedBySync.indexOf(windowId), 1);
-	} else if (confirm('Remove these tabs from sync?')) {
+	} else {
 		getCurrentWindowCount().then(count => {
 			if (count == 0) {
 				console.log("last window removed by user: ", windowId);
@@ -130,10 +130,6 @@ function windowRemoveHandler(windowId) {
 				syncRemovedWindow(windowId);
 			}
 		});
-	} else {
-		// Do nothing, we don't want to trigger sync
-		// if the user is just shutting the program
-		// down until future use.
 	}
 }
 
