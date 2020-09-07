@@ -118,13 +118,15 @@ function windowCreateByUserHandler(window) {
 function windowRemoveHandler(windowId) {
 	console.log("windowRemoveHandler: ", windowId);
 	if (windowsRemovedBySync.includes(windowId)) {
-		console.log("windowRemoveHandler done (started by synced window)");
+		console.log("window removed by sync handler: ", windowId);
 		windowsRemovedBySync.splice(windowsRemovedBySync.indexOf(windowId), 1);
 	} else if (confirm('Remove these tabs from sync?')) {
 		getCurrentWindowCount().then(count => {
 			if (count == 0) {
+				console.log("last window removed by user: ", windowId);
 				clearSyncInfo();
 			} else {
+				console.log("window removed by user: ", windowId);
 				syncRemovedWindow(windowId);
 			}
 		});
@@ -175,8 +177,10 @@ function tabRemoveHandler(tabId, removeInfo) {
 	if (removeInfo.isWindowClosing) {
 		// Do nothing. windowRemoveHandler will handle this.
 	} else if (tabsRemovedBySync.includes(tabId)) {
+		console.log("tab removed by sync handler: ", tabId);
 		tabsRemovedBySync.splice(tabsRemovedBySync.indexOf(tabId), 1);
 	} else {
+		console.log("tab removed by user: ", tabId);
 		syncRemovedTab(tabId);
 	}
 }
@@ -260,7 +264,9 @@ function syncAllWindows(window) {
 					};
 					return new Promise((resolveTabClear, rejectTabClear) => {
 						if (typeof window.tabs != "undefined" ? window.tabs.length > 0 : false) { // Clear tabs in this window, before syncing
-							return Promise.all(window.tabs.map(tabId => {
+							// Let's not loop through an changing array.
+							let tabIds = windows.tabs;
+							return Promise.all(tabIds.map(tabId => {
 								return new Promise((resolveTabRemove, rejectTabRemove) => {
 									// Though this isn't because of another device removed a tab, we don't have to sync this event.
 									tabsRemovedBySync.push(tabId);
@@ -625,6 +631,7 @@ function syncEventHandler(change, areaName) {
 		return new Promise((rootResolve, rootReject) => {
 			// First get local sync info, to check if this event was triggered by local change.
 			chrome.storage.local.get(['windows', 'tabs'], result => {
+				console.log("result before sync: ", result);
 				if (typeof change.windows.oldValue == "undefined" &&
 					typeof change.windows.newValue == "undefined") { // Shoudn't be a possible case
 					console.log('exceptional change in syncInfo ', change);
@@ -756,30 +763,43 @@ function syncEventHandler(change, areaName) {
 						//rootResolve();
 					} else { // Not Local event. Another device just closed its (last) Chrome window.
 						console.log("Another device just closed its (last) Chrome window");
-						return Promise.all(result.windows.wids.map(wid => {
+						// Do not loop through an array while splicing it.
+						let wids = result.windows.wids.map(wid => wid);
+						return Promise.all(wids.map(wid => {
 							let tabId = -1;
+							console.log("Closing tabs for wid: ", wid);
+							console.log("Tabs to be closed: ", result.windows[wid].tabs);
 							// First, close all tabs attached to this window.
-							return Promise.all(result.windows[wid].tabs.map(tid => {
+							let windowId = -1;
+							windowsRemovedBySync.push(windowId); // Closing all tab might remove the window, too
+							// Looping through result.windows[wid].tabs and splice it in the loop caused wrong behavior.
+							// FIXME: Correct other similar codes!!
+							let tids = result.windows[wid].tabs.map(tid => tid);
+							return Promise.all(tids.map(tid => {
 								if (typeof result.tabs[tid] == "undefined") {
 									console.log("Cannot find tab with tid: ", tid);
 									return;
 								}
 								tabId = result.tabs[tid].id;
+								console.log("Closing tab with tid: " + tid + ", tabId: " + tabId);
 								tabsRemovedBySync.push(tabId);
 								result.windows[wid].tabs.splice(result.windows[wid].tabs.indexOf(tid), 1);
 								result.tabs.tids.splice(result.tabs.tids.indexOf(tid), 1);
 								delete result.tabs[tid];
 								return new Promise((resolve, reject) => {
 									chrome.tabs.remove(tabId, () => {
+										console.log("Closed tab with tid: ", tid);
 										resolve();
 									});
 								});
 							})).then(() => { // All tabs attached to this window are closed.
-								let windowId = -1;
 								windowId = result.windows[wid].id;
-								windowsRemovedBySync.push(windowId);
+								console.log("Closing window after all tabs closed, wid: " + wid + ", windowId: " + windowId);
+								// This was handled above.
+								//windowsRemovedBySync.push(windowId);
 								result.windows.wids.splice(result.windows.wids.indexOf(wid), 1);
 								delete result.windows[wid];
+								console.log("Removing a window after its last tab was closed. Would it be OK?");
 								return new Promise((resolve, reject) => {
 									chrome.windows.remove(windowId, () => resolve());
 								});
