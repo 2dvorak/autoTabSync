@@ -689,7 +689,7 @@ function syncEventHandler(change, areaName) {
 											pos: 0
 										};
 									}
-									if (change.windows.newValue[wid].tabs.length > 0) { // There are tabs to create, too
+									if (change.windows.newValue[wid].tabs.length > 1) { // There are more tabs to create
 										console.log("Also syncing tabs of the window created by another device");
 										console.log("tabs: ", change.windows.newValue[wid].tabs);
 										return Promise.all(change.windows.newValue[wid].tabs.map(tid => {
