@@ -16,6 +16,8 @@ var windowsRemovedBySync = []; // Array of id.
 var tabsAddedBySync = []; // Array of Object.
 var tabsRemovedBySync = []; // Array of id.
 var tabsRemovedByWindowClose = []; // Not sure if we need this.
+var tabsUpdatedBySync = []; // Array of id.
+var tabsMovedBySync = []; // Array of id.
 var syncInProcess = false;
 
 var newTabUrl = "chrome://newtab/";
@@ -178,6 +180,60 @@ function tabRemoveHandler(tabId, removeInfo) {
 	} else {
 		console.log("tab removed by user: ", tabId);
 		syncRemovedTab(tabId);
+	}
+}
+
+// Handle URL changes. This event does NOT include
+// tab moves (resposition in a window),
+// or tab attach/detach (moved between windows).
+function tabUpdateHandler(tabId, changeInfo, tab) {
+	console.log("tabUpdateHandler: ", changeInfo);
+	if (typeof changeInfo.url == "undefined") {
+		// No change in tab url (e.g., tab reloaded, muted, ...). Skip this event.
+		console.log("No change in tab url");
+	} else if (tabsUpdatedBySync.includes(tabId)) {
+		console.log("tab updated by sync handler: ", tabId);
+		tabsUpdatedBySync.splice(tabsUpdatedBySync.indexOf(tabId), 1);
+	} else {
+		console.log("tab updated by user: ", tabId);
+		syncUpdatedTab(tabId, changeInfo, tab);
+	}
+}
+
+// Handle index changes. This event does NOT include
+// tab attach/detach (tabs moved between windows).
+function tabMoveHandler(tabId, moveInfo) {
+	console.log("tabMoveHandler: ", moveInfo);
+	if (tabsMovedBySync.includes(tabId)) {
+		console.log("tab moved by sync handler: ", tabId);
+		tabsMovedBySync.splice(tabsMovedBySync.indexOf(tabId), 1);
+	} else {
+		console.log("tab moved by user: ", tabId);
+		syncMovedTab(tabId, moveInfo);
+	}
+}
+
+// Handle tab detached (moved between windows)
+function tabDetachHandler(tabId, detachInfo) {
+	console.log("tabDetachHandler: ", detachInfo);
+	if (tabsMovedBySync.includes(tabId)) {
+		console.log("tab detached by sync handler: ", tabId);
+		// Don't remove tabId from tabsRemovedBySync yet, because it should be handled in tabAttachHandler.
+	} else {
+		console.log("tab detached by user: ", tabId);
+		// Don't sync this event, do it after the detached tab is attached to another window.
+	}
+}
+
+// Handle tab attached (moved between windows)
+function tabAttachHandler(tabId, attachInfo) {
+	console.log("tabAttachHandler: ", attachInfo);
+	if (tabsMovedBySync.includes(tabId)) {
+		console.log("tab attached by sync handler: ", tabId);
+		tabsMovedBySync.splice(tabsMovedBySync.indexOf(tabId), 1);
+	} else {
+		console.log("tab attached by user: ", tabId);
+		syncAttachedTab(tabId, attachInfo);
 	}
 }
 
@@ -612,6 +668,49 @@ function syncRemovedTab(tabId) {
 	}
 }
 
+function syncUpdatedTab(tabId, changeInfo, tab) {
+	if (syncInProcess) {
+		setTimeout(() => {
+			syncUpdatedTab(tabId, changeInfo, tab);
+		}, 500);
+	} else {
+		syncInProcess = true;
+		console.log("syncUpdatedTab started");
+		let tid = '';
+		let wid = '';
+		return new Promise((resolve, reject) => {
+			console.log("changeInfo: ", changeInfo);
+			chrome.storage.local.get(['tabs'], result => {
+				console.log("localSync: ", result);
+				tid = result.tabs.tids.find(obj => result.tabs[obj].id == tabId);
+				result.tabs[tid].url = changeInfo.url;
+				chrome.storage.local.set({
+					tabs: result.tabs
+				}, () => resolve());
+			});
+		}).then(() => {
+			return new Promise((resolve, reject) => {
+				chrome.storage.sync.get(['tabs'], result => {
+					console.log("globalSync: " , result);
+					result.tabs[tid].url = changeInfo.url;
+					chrome.storage.sync.set({
+						tabs: result.tabs
+					}, () => resolve());
+				});
+			});
+		}).then(() => {
+			syncInProcess = false;
+			console.log("syncUpdatedTab done");
+		});
+	}
+}
+
+function syncMovedTab(tabId, moveInfo) {
+}
+
+function syncAttachedTab(tabId, attachInfo) {
+}
+
 // Sync event handlers
 
 function syncEventHandler(change, areaName) {
@@ -628,7 +727,33 @@ function syncEventHandler(change, areaName) {
 			// First get local sync info, to check if this event was triggered by local change.
 			chrome.storage.local.get(['windows', 'tabs'], result => {
 				console.log("result before sync: ", result);
-				if (typeof change.windows.oldValue == "undefined" &&
+				if (typeof change.windows == "undefined") { // Only tabs changed: tab update, move, attach/detach
+					console.log("tab update, move, attach/detach: ", change.tabs);
+					let promises = [];
+					return new Promise((resolveTabsIter, rejectTabsIter) => {
+						change.tabs.newValue.tids.forEach(tid => {
+							if (result.tabs.tids.includes(tid) ? typeof result.tabs[tid] != "undefined" : false) {
+								if (result.tabs[tid].url != change.tabs.newValue[tid].url) {
+									let tabId = result.tabs[tid].id;
+									tabsUpdatedBySync.push(tabId);
+									promises.push(new Promise((resolve, reject) => {
+										chrome.tabs.update(tabId, { url: change.tabs.newValue[tid].url }, tab => {
+											result.tabs[tid].url = tab.url;
+											resolve();
+										});
+									}));
+								}
+							}
+						});
+						resolveTabsIter(promises);
+					}).then(promises => {
+						return Promise.all(promises);
+					}).then(() => {
+						chrome.storage.local.set({
+							tabs: result.tabs
+						}, () => rootResolve());
+					});
+				} else if (typeof change.windows.oldValue == "undefined" &&
 					typeof change.windows.newValue == "undefined") { // Shoudn't be a possible case
 					console.log('exceptional change in syncInfo ', change);
 					rootResolve();
@@ -1078,4 +1203,5 @@ chrome.windows.onCreated.addListener(windowCreateHandler);
 chrome.windows.onRemoved.addListener(windowRemoveHandler);
 chrome.tabs.onCreated.addListener(tabCreateHandler);
 chrome.tabs.onRemoved.addListener(tabRemoveHandler);
+chrome.tabs.onUpdated.addListener(tabUpdateHandler);
 chrome.storage.onChanged.addListener(syncEventHandler);
